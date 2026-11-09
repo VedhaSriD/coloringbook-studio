@@ -21,7 +21,7 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 // Serve static project files
 app.use('/projects-files', express.static(DATA_DIR));
 
-// Serve client in production
+// Serve client if built
 if (fs.existsSync(path.join(__dirname, 'client/dist'))) {
   app.use(express.static(path.join(__dirname, 'client/dist')));
 }
@@ -51,7 +51,7 @@ const upload = multer({
   }
 });
 
-// Helper: Read / Write Project Data
+// Helpers to read / write projects
 function getProjectFilePath(projectId) {
   return path.join(DATA_DIR, projectId, 'project-data.json');
 }
@@ -68,17 +68,30 @@ function saveProject(projectId, data) {
   fs.writeFileSync(getProjectFilePath(projectId), JSON.stringify(data, null, 2), 'utf8');
 }
 
+// Helper: resolve URL path to local file path
+function resolveToDisk(urlPath) {
+  if (!urlPath) return null;
+  const clean = urlPath.split('?')[0].replace(/^\//, '');
+  if (clean.startsWith('projects-files/')) {
+    const relative = clean.replace(/^projects-files\//, '');
+    return path.join(DATA_DIR, relative);
+  }
+  return path.join(__dirname, clean);
+}
+
 // ======================== API ROUTES ========================
 
 // 1. Get All Projects
 app.get('/api/projects', (req, res) => {
   try {
     const projects = [];
-    const dirs = fs.readdirSync(DATA_DIR);
-    for (const dir of dirs) {
-      const projPath = path.join(DATA_DIR, dir, 'project-data.json');
-      if (fs.existsSync(projPath)) {
-        projects.push(JSON.parse(fs.readFileSync(projPath, 'utf8')));
+    if (fs.existsSync(DATA_DIR)) {
+      const dirs = fs.readdirSync(DATA_DIR);
+      for (const dir of dirs) {
+        const projPath = path.join(DATA_DIR, dir, 'project-data.json');
+        if (fs.existsSync(projPath)) {
+          projects.push(JSON.parse(fs.readFileSync(projPath, 'utf8')));
+        }
       }
     }
     res.json(projects);
@@ -102,17 +115,16 @@ app.post('/api/projects', (req, res) => {
       theme: theme || 'Cute Animals and Nature',
       targetAge: targetAge || '4-8 years',
       pageCount: pageCount || 30,
-      paperSize: paperSize || 'US Letter (8.5 x 11 inches)',
-      style: style || 'Clean thick outlines, pure black and white cartoon',
+      paperSize: paperSize || 'US Letter, 8.5 × 11 inches',
+      style: style || 'Pure black outlines, pure white background, thick lines, no grayscale',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       cover: cover || {
         title: title || 'My Little Animal World',
-        subtitle: 'A Cute Animals Coloring Book for Kids Ages 4-8',
+        subtitle: 'A Fun Printable Coloring Experience For Kids Ages 4–8 years',
         author: 'ColoringBook Studio',
         coverImage: null,
-        bgColor: '#fef08a',
-        textColor: '#1f2937'
+        bgColor: '#fffbeb'
       },
       pages: pages || []
     };
@@ -124,7 +136,7 @@ app.post('/api/projects', (req, res) => {
   }
 });
 
-// 3. Get Project
+// 3. Get Project by ID
 app.get('/api/projects/:id', (req, res) => {
   const project = loadProject(req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -168,18 +180,17 @@ app.post('/api/upload', upload.single('image'), (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-// 7. AI Image Generation (Enforced Black & White Coloring Sheets)
+
+// 7. AI Image Generation
 app.post('/api/generate-ai-image', async (req, res) => {
   try {
     const { projectId, conceptPrompt } = req.body;
     
-    // Prompt formula specifically targeting black ink lines on white paper
     const cleanPrompt = `black ink line art, coloring book sheet of ${conceptPrompt}, thick black contour outlines, clean empty white background, uncolored, line drawing, 2d cartoon stencil for kids to color in with crayons, white paper`;
 
     console.log(`🎨 Generating B&W line sheet for: "${conceptPrompt}"...`);
 
     const seed = Math.floor(Math.random() * 999999);
-    // Add negative filter to stop color, dark backgrounds, and 3d renders
     const freeUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(cleanPrompt)}?width=768&height=1024&seed=${seed}&nologo=true&negative=color,colors,green,red,yellow,blue,dark background,black background,shading,realistic,photo,render`;
 
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -220,10 +231,9 @@ app.post('/api/generate-ai-image', async (req, res) => {
     fs.mkdirSync(destDir, { recursive: true });
     const localPath = path.join(destDir, filename);
 
-    // Enforce pure black and white & boost contrast to blow out any background tones to white
     await sharp(buffer)
-      .grayscale() // Completely removes all green, yellow, and colors
-      .linear(1.4, -40) // Makes dark outlines darker and light background pure white
+      .grayscale()
+      .linear(1.4, -40)
       .toFormat('png')
       .toFile(localPath);
 
@@ -240,7 +250,7 @@ app.post('/api/generate-ai-image', async (req, res) => {
   }
 });
 
-// 8. Quality Audit Verification Endpoint
+// 8. Quality Audit Verification
 app.post('/api/projects/:id/audit', async (req, res) => {
   try {
     const project = loadProject(req.params.id);
@@ -265,10 +275,6 @@ app.post('/api/projects/:id/audit', async (req, res) => {
       issues.push(`Missing illustrations on pages: ${missingPages.join(', ')}.`);
     }
 
-    if (!project.cover?.coverImage) {
-      issues.push('The cover does not have an assigned cover illustration image.');
-    }
-
     res.json({
       passed: issues.length === 0,
       issues,
@@ -287,131 +293,145 @@ app.post('/api/projects/:id/export-pdf', async (req, res) => {
     const project = loadProject(req.params.id);
     if (!project) return res.status(404).json({ error: 'Project not found' });
 
-    // US Letter: 8.5 x 11 inches at 72 pt/inch = 612 x 792 pt
+    // US Letter: 8.5 x 11 inches at 72 pt/in = 612 x 792 pt
     const PAGE_WIDTH = 612;
     const PAGE_HEIGHT = 792;
-    const MARGIN = 36; // 0.5 inch safety margin
+    const MARGIN = 36; // 0.5 inch margin
 
     const pdfDoc = await PDFDocument.create();
     const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
     const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
-    // 1. COVER PAGE
+    // ================= 1. COVER PAGE =================
     const coverPage = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-    // Draw optional cover background color
     coverPage.drawRectangle({
       x: 0,
       y: 0,
       width: PAGE_WIDTH,
       height: PAGE_HEIGHT,
-      color: rgb(0.99, 0.96, 0.89) // soft gentle cream
+      color: rgb(0.99, 0.98, 0.92)
     });
 
-    // Cover Title
-    coverPage.drawText(project.cover.title || project.title, {
+    const coverTitle = project.cover?.title || project.title;
+    const titleFontSize = coverTitle.length > 32 ? 20 : 24;
+    coverPage.drawText(coverTitle, {
       x: MARGIN,
-      y: PAGE_HEIGHT - 90,
-      size: 28,
+      y: PAGE_HEIGHT - 80,
+      size: titleFontSize,
       font: helveticaBold,
-      color: rgb(0.1, 0.1, 0.1)
+      color: rgb(0.12, 0.12, 0.12),
+      maxWidth: PAGE_WIDTH - MARGIN * 2
     });
 
-    // Cover Subtitle
-    if (project.cover.subtitle) {
+    if (project.cover?.subtitle) {
       coverPage.drawText(project.cover.subtitle, {
         x: MARGIN,
-        y: PAGE_HEIGHT - 125,
-        size: 15,
+        y: PAGE_HEIGHT - 115,
+        size: 13,
         font: helvetica,
-        color: rgb(0.3, 0.3, 0.3)
+        color: rgb(0.35, 0.35, 0.35),
+        maxWidth: PAGE_WIDTH - MARGIN * 2
       });
     }
 
-    // Cover Image if provided
-    if (project.cover.coverImage) {
-      const coverImgPath = path.join(__dirname, project.cover.coverImage.replace(/^\//, ''));
-      if (fs.existsSync(coverImgPath)) {
-        const imgBytes = fs.readFileSync(coverImgPath);
-        const embeddedImg = coverImgPath.endsWith('.png') ? await pdfDoc.embedPng(imgBytes) : await pdfDoc.embedJpg(imgBytes);
+    // Embed Cover Image if available
+    const coverImagePath = resolveToDisk(project.cover?.coverImage);
+    if (coverImagePath && fs.existsSync(coverImagePath)) {
+      console.log(`📘 Embedding Cover Image from: ${coverImagePath}`);
+      const rawCoverBytes = fs.readFileSync(coverImagePath);
+      const pngCoverBytes = await sharp(rawCoverBytes).png().toBuffer();
+      const embeddedCover = await pdfDoc.embedPng(pngCoverBytes);
 
-        const imgDim = embeddedImg.scaleToFit(PAGE_WIDTH - MARGIN * 2, PAGE_HEIGHT - 260);
-        coverPage.drawImage(embeddedImg, {
-          x: (PAGE_WIDTH - imgDim.width) / 2,
-          y: (PAGE_HEIGHT - imgDim.height) / 2 - 20,
-          width: imgDim.width,
-          height: imgDim.height
-        });
-      }
+      const maxCoverW = PAGE_WIDTH - MARGIN * 2;
+      const maxCoverH = PAGE_HEIGHT - 240;
+      const scaledCover = embeddedCover.scaleToFit(maxCoverW, maxCoverH);
+
+      coverPage.drawImage(embeddedCover, {
+        x: (PAGE_WIDTH - scaledCover.width) / 2,
+        y: (PAGE_HEIGHT - scaledCover.height) / 2 - 20,
+        width: scaledCover.width,
+        height: scaledCover.height
+      });
     }
 
-    // Author / Brand
-    if (project.cover.author) {
+    if (project.cover?.author) {
       coverPage.drawText(`Created by ${project.cover.author}`, {
         x: MARGIN,
-        y: 45,
-        size: 12,
+        y: 40,
+        size: 11,
         font: helvetica,
-        color: rgb(0.35, 0.35, 0.35)
+        color: rgb(0.4, 0.4, 0.4)
       });
     }
 
-    // 2. COPYRIGHT & PRINTING NOTICE PAGE
+    // ================= 2. COPYRIGHT NOTICE PAGE =================
     const noticePage = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-    noticePage.drawText(project.title, { x: MARGIN, y: PAGE_HEIGHT - 120, size: 20, font: helveticaBold });
-    noticePage.drawText('Printable Coloring Book Edition', { x: MARGIN, y: PAGE_HEIGHT - 145, size: 13, font: helvetica });
-    noticePage.drawText('All rights reserved. For personal and educational use only.', { x: MARGIN, y: PAGE_HEIGHT - 180, size: 10, font: helvetica });
-    noticePage.drawText('Recommended printing: 8.5 x 11 inches (US Letter) at 100% scale.', { x: MARGIN, y: PAGE_HEIGHT - 200, size: 10, font: helvetica });
+    noticePage.drawText(project.title, { 
+      x: MARGIN, 
+      y: PAGE_HEIGHT - 120, 
+      size: 18, 
+      font: helveticaBold 
+    });
+    noticePage.drawText('Printable Coloring Book Edition', { 
+      x: MARGIN, 
+      y: PAGE_HEIGHT - 145, 
+      size: 13, 
+      font: helvetica 
+    });
+    noticePage.drawText('All rights reserved. For personal and educational use only.', { 
+      x: MARGIN, 
+      y: PAGE_HEIGHT - 180, 
+      size: 10, 
+      font: helvetica 
+    });
+    noticePage.drawText('Recommended printing: 8.5 x 11 inches (US Letter) at 100% scale.', { 
+      x: MARGIN, 
+      y: PAGE_HEIGHT - 200, 
+      size: 10, 
+      font: helvetica 
+    });
 
-    // 3. COLORING PAGES
+    // ================= 3. COLORING PAGES =================
+    console.log(`📄 Compiling ${project.pages.length} coloring pages into PDF...`);
+
     for (let i = 0; i < project.pages.length; i++) {
       const pageData = project.pages[i];
       const page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
 
-      // If user requested preview low-res watermark
       if (isPreview) {
         page.drawText('PREVIEW ONLY - NOT FOR RESALE', {
-          x: MARGIN + 40,
+          x: 70,
           y: PAGE_HEIGHT / 2,
           size: 26,
           font: helveticaBold,
-          color: rgb(0.85, 0.85, 0.85),
+          color: rgb(0.88, 0.88, 0.88),
           rotate: { type: 'degrees', angle: 45 }
         });
       }
 
-      if (pageData.imageUrl) {
-        const relPath = pageData.imageUrl.replace(/^\//, '');
-        const fullImgPath = path.join(__dirname, relPath);
+      const imgDiskPath = resolveToDisk(pageData.imageUrl);
 
-        if (fs.existsSync(fullImgPath)) {
-          let imgBytes = fs.readFileSync(fullImgPath);
+      if (imgDiskPath && fs.existsSync(imgDiskPath)) {
+        let rawBytes = fs.readFileSync(imgDiskPath);
+        const cleanPngBytes = await sharp(rawBytes).png().toBuffer();
+        const embeddedImg = await pdfDoc.embedPng(cleanPngBytes);
 
-          // If low-res preview, optimize size
-          if (isPreview) {
-            imgBytes = await sharp(imgBytes).resize(800).jpeg({ quality: 60 }).toBuffer();
-          }
+        const maxW = PAGE_WIDTH - MARGIN * 2;
+        const maxH = PAGE_HEIGHT - MARGIN * 2 - 40;
+        const scaled = embeddedImg.scaleToFit(maxW, maxH);
 
-          const embedded = fullImgPath.endsWith('.png') && !isPreview ? await pdfDoc.embedPng(imgBytes) : await pdfDoc.embedJpg(imgBytes);
-
-          // Maintain portrait aspect ratio without distortion
-          const maxW = PAGE_WIDTH - MARGIN * 2;
-          const maxH = PAGE_HEIGHT - MARGIN * 2 - 30; // Leave room for caption/page num
-          const scaled = embedded.scaleToFit(maxW, maxH);
-
-          page.drawImage(embedded, {
-            x: (PAGE_WIDTH - scaled.width) / 2,
-            y: (PAGE_HEIGHT - scaled.height) / 2 + 10,
-            width: scaled.width,
-            height: scaled.height
-          });
-        }
+        page.drawImage(embeddedImg, {
+          x: (PAGE_WIDTH - scaled.width) / 2,
+          y: (PAGE_HEIGHT - scaled.height) / 2 + 10,
+          width: scaled.width,
+          height: scaled.height
+        });
       }
 
-      // Page Number Footer
-      const footerText = `${i + 1}`;
-      page.drawText(footerText, {
+      const footerNum = `${i + 1}`;
+      page.drawText(footerNum, {
         x: PAGE_WIDTH / 2 - 4,
-        y: 25,
+        y: 22,
         size: 10,
         font: helvetica,
         color: rgb(0.5, 0.5, 0.5)
@@ -423,6 +443,7 @@ app.post('/api/projects/:id/export-pdf', async (req, res) => {
     const exportPath = path.join(DATA_DIR, project.id, 'exports', filename);
 
     fs.writeFileSync(exportPath, pdfBytes);
+    console.log(`✅ PDF successfully generated: ${filename}`);
 
     res.json({
       success: true,
@@ -441,10 +462,11 @@ app.get('*', (req, res) => {
   if (fs.existsSync(indexFile)) {
     res.sendFile(indexFile);
   } else {
-    res.send('ColoringBook Studio Backend running. Run Vite frontend in /client or run npm run dev:client');
+    res.send('ColoringBook Studio Backend running.');
   }
 });
 
+// Listen on Port (Keeps Server Alive)
 app.listen(PORT, () => {
   console.log(`🎨 ColoringBook Studio server listening on http://localhost:${PORT}`);
 });
